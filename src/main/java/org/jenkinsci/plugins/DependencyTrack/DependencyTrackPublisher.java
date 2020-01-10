@@ -17,9 +17,7 @@ package org.jenkinsci.plugins.DependencyTrack;
 
 import hudson.Extension;
 import hudson.FilePath;
-import hudson.Launcher;
 import hudson.model.AbstractProject;
-import hudson.model.Action;
 import hudson.model.Result;
 import hudson.model.Run;
 import hudson.model.TaskListener;
@@ -28,13 +26,15 @@ import hudson.tasks.BuildStepMonitor;
 import hudson.tasks.Publisher;
 import hudson.util.FormValidation;
 import hudson.util.ListBoxModel;
-import jenkins.tasks.SimpleBuildStep;
 import net.sf.json.JSONObject;
 import org.apache.commons.lang3.StringUtils;
 import org.jenkinsci.Symbol;
 import org.jenkinsci.plugins.DependencyTrack.model.Finding;
 import org.jenkinsci.plugins.DependencyTrack.model.RiskGate;
 import org.jenkinsci.plugins.DependencyTrack.model.SeverityDistribution;
+import org.jenkinsci.plugins.workflow.steps.StepContext;
+import org.jenkinsci.plugins.workflow.steps.StepExecution;
+import org.jenkinsci.plugins.workflow.steps.SynchronousNonBlockingStepExecution;
 import org.kohsuke.stapler.DataBoundConstructor;
 import org.kohsuke.stapler.DataBoundSetter;
 import org.kohsuke.stapler.QueryParameter;
@@ -53,7 +53,9 @@ import java.net.URL;
 import java.util.ArrayList;
 
 @SuppressWarnings("unused")
-public class DependencyTrackPublisher extends ThresholdCapablePublisher implements SimpleBuildStep, Serializable {
+public class DependencyTrackPublisher extends ThresholdCapablePublisher implements Serializable {
+
+    static final String PLUGIN_NAME = "DependencyTrack";
 
     private static final long serialVersionUID = 480115440498217963L;
 
@@ -70,7 +72,7 @@ public class DependencyTrackPublisher extends ThresholdCapablePublisher implemen
     public DependencyTrackPublisher(final String artifact, final String artifactType, final boolean synchronous) {
         this.artifact = artifact;
         this.artifactType = artifactType;
-        this.isScanResult = artifactType == null || !"bom".equals(artifactType);
+        this.isScanResult = !"bom".equals(artifactType);
         this.synchronous = synchronous;
 
         this.projectId = null;
@@ -152,130 +154,134 @@ public class DependencyTrackPublisher extends ThresholdCapablePublisher implemen
         return synchronous;
     }
 
-    /**
-     * This method is called whenever the build step is executed.
-     *
-     * @param build    A Run object
-     * @param filePath A FilePath object
-     * @param launcher A Launcher object
-     * @param listener A BuildListener object
-     */
     @Override
-    public void perform(@Nonnull final Run<?, ?> build,
-                        @Nonnull final FilePath filePath,
-                        @Nonnull final Launcher launcher,
-                        @Nonnull final TaskListener listener) throws InterruptedException, IOException {
+    public StepExecution start(StepContext stepContext) {
+        return new Execution(stepContext, this);
+    }
 
-        ConsoleLogger logger = new ConsoleLogger(listener);
-        final ApiClient apiClient = new ApiClient(
-                getDescriptor().getDependencyTrackUrl(), getDescriptor().getDependencyTrackApiKey(), logger);
+    private static final class Execution extends SynchronousNonBlockingStepExecution<DependencyResultSummary> {
 
-        logger.log(Messages.Builder_Publishing() + " - " + getDescriptor().getDependencyTrackUrl());
+        private DependencyTrackPublisher step;
 
-        final String projectId = build.getEnvironment(listener).expand(this.projectId);
-        final String artifact = build.getEnvironment(listener).expand(this.artifact);
-        final boolean autoCreateProject = getDescriptor().isDependencyTrackAutoCreateProjects();
-
-        if (StringUtils.isBlank(artifact)) {
-            logger.log(Messages.Builder_Artifact_Unspecified());
-            build.setResult(Result.FAILURE);
-            return;
+        public Execution(@Nonnull final StepContext context, final DependencyTrackPublisher step) {
+            super(context);
+            this.step = step;
         }
-        final FilePath artifactFilePath = new FilePath(filePath, artifact);
-        if (projectId == null && (projectName == null || projectVersion == null)) {
-            logger.log(Messages.Builder_Result_InvalidArguments());
-            build.setResult(Result.FAILURE);
-            return;
-        }
-        try {
-            if (!filePath.exists()) {
-                logger.log(Messages.Builder_Artifact_NonExist());
-                build.setResult(Result.FAILURE);
-                return;
-            }
-            final ApiClient.UploadResult uploadResult = apiClient.upload(projectId, projectName, projectVersion,
-                    artifactFilePath, isScanResult, autoCreateProject);
 
-            if (!uploadResult.isSuccess()) {
-                build.setResult(Result.FAILURE); //todo: make configurable
-                return;
+        @Override
+        protected DependencyResultSummary run() throws Exception {
+            final TaskListener listener = getContext().get(TaskListener.class);
+            final Run<?, ?> build = getContext().get(Run.class);
+            final FilePath filePath = getContext().get(FilePath.class);
+            if (listener == null || build == null || filePath == null) {
+                // this should never happen, but checking to suppress warnings below
+                throw new IllegalStateException("Context state unavailable");
             }
+            final ConsoleLogger logger = new ConsoleLogger(listener);
+            final ApiClient apiClient = new ApiClient(
+                    step.getDependencyTrackDescriptor().getDependencyTrackUrl(),
+                    step.getDependencyTrackDescriptor().getDependencyTrackApiKey(), logger);
 
-            if (synchronous && isScanResult) {
-                logger.log(Messages.Builder_Artifact_NonBomSync());
-                return;
+            logger.log(Messages.Builder_Publishing() + " - " + step.getDependencyTrackDescriptor().getDependencyTrackUrl());
+
+            final String projectId = build.getEnvironment(listener).expand(step.projectId);
+            final String artifact = build.getEnvironment(listener).expand(step.artifact);
+            final boolean autoCreateProject = step.getDependencyTrackDescriptor().isDependencyTrackAutoCreateProjects();
+
+            if (StringUtils.isBlank(artifact)) {
+                logger.log(Messages.Builder_Artifact_Unspecified());
+                throw new ConfigurationException("Artifact Not Specified");
             }
+            final FilePath artifactFilePath = new FilePath(filePath, artifact);
+            if (projectId == null && (step.projectName == null || step.projectVersion == null)) {
+                logger.log(Messages.Builder_Result_InvalidArguments());
+                throw new ConfigurationException("Invalid Arguments");
+            }
+            try {
+                if (!filePath.exists()) {
+                    logger.log(Messages.Builder_Artifact_NonExist());
+                    throw new ConfigurationException("Missing Artifact");
+                }
+                final ApiClient.UploadResult uploadResult = apiClient.upload(projectId, step.projectName, step.projectVersion,
+                        artifactFilePath, step.isScanResult, autoCreateProject);
 
-            if (uploadResult.getToken() != null && synchronous) {
-                final long timeout = System.currentTimeMillis() + (60000L * getDescriptor().getDependencyTrackPollingTimeout());
-                Thread.sleep(10000);
-                logger.log(Messages.Builder_Polling());
-                while (apiClient.isTokenBeingProcessed(uploadResult.getToken())) {
+                if (!uploadResult.isSuccess()) {
+                    throw new ServerException("Upload failed");
+                }
+
+                if (step.synchronous && step.isScanResult) {
+                    logger.log(Messages.Builder_Artifact_NonBomSync());
+                    return new DependencyResultSummary(build.getNumber());
+                }
+
+                if (uploadResult.getToken() != null && step.synchronous) {
+                    final long timeout = System.currentTimeMillis() +
+                            (60000L * step.getDependencyTrackDescriptor().getDependencyTrackPollingTimeout());
                     Thread.sleep(10000);
-                    if (timeout < System.currentTimeMillis()) {
-                        logger.log(Messages.Builder_Polling_Timeout_Exceeded());
-                        return;
-                    }
                     logger.log(Messages.Builder_Polling());
-                }
-                if (this.projectId == null) {
-                    // project was auto-created. Fetch it's new uuid so that we can look up the results
-                    logger.log(Messages.Builder_Project_Lookup());
-                    final String jsonResponseBody = apiClient.lookupProject(this.projectName, this.projectVersion);
-                    this.projectId = new ProjectLookupParser(jsonResponseBody).parse().getProject().getUuid();
-                }
-                logger.log(Messages.Builder_Findings_Processing());
-                final String jsonResponseBody = apiClient.getFindings(this.projectId);
-                final FindingParser parser = new FindingParser(build.getNumber(), jsonResponseBody).parse();
-                final ArrayList<Finding> findings = parser.getFindings();
-                final SeverityDistribution severityDistribution = parser.getSeverityDistribution();
-                final ResultAction projectAction = new ResultAction(build, findings, severityDistribution);
-                build.addAction(projectAction);
+                    while (apiClient.isTokenBeingProcessed(uploadResult.getToken())) {
+                        Thread.sleep(10000);
+                        if (timeout < System.currentTimeMillis()) {
+                            logger.log(Messages.Builder_Polling_Timeout_Exceeded());
+                            throw new ServerException("Timeout waiting for synchronous response");
+                        }
+                        logger.log(Messages.Builder_Polling());
+                    }
+                    if (step.projectId == null) {
+                        // project was auto-created. Fetch it's new uuid so that we can look up the results
+                        logger.log(Messages.Builder_Project_Lookup());
+                        final String jsonResponseBody = apiClient.lookupProject(step.projectName, step.projectVersion);
+                        step.projectId = new ProjectLookupParser(jsonResponseBody).parse().getProject().getUuid();
+                    }
+                    logger.log(Messages.Builder_Findings_Processing());
+                    final String jsonResponseBody = apiClient.getFindings(step.projectId);
+                    final FindingParser parser = new FindingParser(build.getNumber(), jsonResponseBody).parse();
+                    final ArrayList<Finding> findings = parser.getFindings();
+                    final SeverityDistribution severityDistribution = parser.getSeverityDistribution();
+                    final ResultAction projectAction = new ResultAction(build, findings, severityDistribution);
+                    build.addAction(projectAction);
 
-                // Get previous results and evaluate to thresholds
-                final Run previousBuild = build.getPreviousBuild();
-                final RiskGate riskGate = new RiskGate(getThresholds());
-                if (previousBuild != null) {
-                    final ResultAction previousResults = previousBuild.getAction(ResultAction.class);
-                    if (previousResults != null) {
-                        final Result result = riskGate.evaluate(
-                                previousResults.getSeverityDistribution(),
-                                previousResults.getFindings(),
-                                severityDistribution,
-                                findings);
-                        evaluateRiskGates(build, logger, result);
+                    // Get previous results and evaluate to thresholds
+                    final Run<?, ?> previousBuild = build.getPreviousBuild();
+                    final RiskGate riskGate = new RiskGate(step.getThresholds());
+                    if (previousBuild != null) {
+                        final ResultAction previousResults = previousBuild.getAction(ResultAction.class);
+                        if (previousResults != null) {
+                            final Result result = riskGate.evaluate(
+                                    previousResults.getSeverityDistribution(),
+                                    previousResults.getFindings(),
+                                    severityDistribution,
+                                    findings);
+                            evaluateRiskGates(build, logger, result);
+                        } else { // Resolves https://issues.jenkins-ci.org/browse/JENKINS-58387
+                            final Result result = riskGate.evaluate(severityDistribution, new ArrayList<>(), severityDistribution, findings);
+                            evaluateRiskGates(build, logger, result);
+                        }
                     } else { // Resolves https://issues.jenkins-ci.org/browse/JENKINS-58387
                         final Result result = riskGate.evaluate(severityDistribution, new ArrayList<>(), severityDistribution, findings);
                         evaluateRiskGates(build, logger, result);
                     }
-                } else { // Resolves https://issues.jenkins-ci.org/browse/JENKINS-58387
-                    final Result result = riskGate.evaluate(severityDistribution, new ArrayList<>(), severityDistribution, findings);
-                    evaluateRiskGates(build, logger, result);
+                    return new DependencyResultSummary(projectAction);
                 }
+            } catch (ApiClientException e) {
+                logger.log(e.getMessage());
+                throw e;
             }
-        } catch (ApiClientException e) {
-            logger.log(e.getMessage());
-            build.setResult(Result.FAILURE); //todo: make configurable
+            return new DependencyResultSummary(build.getNumber());
         }
-    }
 
-    private void evaluateRiskGates(final Run<?, ?> build, final ConsoleLogger logger, final Result result) {
-        if (Result.SUCCESS != result) {
-            logger.log(Messages.Builder_Threshold_Exceed());
-            build.setResult(result); // only set the result if the evaluation fails the threshold
+        private void evaluateRiskGates(final Run<?, ?> build, final ConsoleLogger logger, final Result result) {
+            if (Result.SUCCESS != result) {
+                logger.log(Messages.Builder_Threshold_Exceed());
+                build.setResult(Result.UNSTABLE);
+            }
         }
-    }
-
-    @Override
-    public Action getProjectAction(AbstractProject<?, ?> project) {
-        return new JobAction(project);
     }
 
     /**
      * A Descriptor Implementation.
      */
-    @Override
-    public DescriptorImpl getDescriptor() {
+    public DescriptorImpl getDependencyTrackDescriptor() {
         return (DescriptorImpl) super.getDescriptor();
     }
 

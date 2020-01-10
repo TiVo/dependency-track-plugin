@@ -22,7 +22,8 @@ import java.io.PrintStream;
 
 public class ConsoleLogger extends LineTransformationOutputStream {
 
-    private static final String PREFIX = "[" + DependencyTrackPlugin.PLUGIN_NAME + "] ";
+    private static final String PREFIX = "[" + DependencyTrackPublisher.PLUGIN_NAME + "] ";
+
     private transient final PrintStream logger;
 
     public ConsoleLogger(TaskListener listener) {

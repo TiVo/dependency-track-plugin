@@ -15,15 +15,14 @@
  */
 package org.jenkinsci.plugins.DependencyTrack;
 
-import hudson.Plugin;
+public class ServerException extends Exception {
 
-/**
- * Initializes the DependencyTrack plugin.
- *
- * @author Steve Springett (steve.springett@owasp.org)
- */
-public class DependencyTrackPlugin extends Plugin {
+    public ServerException(String message) {
+        super(message);
+    }
 
-    static final String PLUGIN_NAME = "DependencyTrack";
+    public ServerException(String message, Throwable cause) {
+        super(message, cause);
+    }
 
 }

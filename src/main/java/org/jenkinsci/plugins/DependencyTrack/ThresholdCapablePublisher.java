@@ -17,11 +17,12 @@ package org.jenkinsci.plugins.DependencyTrack;
 
 import hudson.tasks.Recorder;
 import org.jenkinsci.plugins.DependencyTrack.model.Thresholds;
+import org.jenkinsci.plugins.workflow.steps.Step;
 import org.kohsuke.stapler.DataBoundSetter;
 import java.io.Serializable;
 
 @SuppressWarnings("unused")
-public abstract class ThresholdCapablePublisher extends Recorder implements Serializable {
+public abstract class ThresholdCapablePublisher extends Step implements Serializable {
 
     private static final long serialVersionUID = 8844465732219790336L;
 
